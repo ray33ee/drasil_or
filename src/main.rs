@@ -1,4 +1,7 @@
 mod onion_secret;
+mod skin;
+mod fsm;
+mod state;
 
 use std::net::SocketAddr;
 use serde::{Serialize, Deserialize};
@@ -10,24 +13,38 @@ use tokio_serde::formats::*;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
+use crate::fsm::FSM;
+
+pub struct Relay {
+    recognised: u64,
+    digest: u64,
+    stream_id: u32,
+    data: RelayType,
+}
+
+//512 bytes of ciphertext
+pub struct EncryptedRelay {
+    ciphertext: Vec<u8>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
-enum RelayType {
+pub enum RelayType {
     Extend{public_x: [u8; 32], ip: SocketAddr},
-    Extended{public_y: [u8; 32], hash: [u8; 32]},
+    Extended{public_y: [u8; 32   ], hash: [u8; 32]},
     Begin{ addr: String },
     Connected,
     Data,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-enum CellType {
+pub enum CellType {
     Create{public_x: [u8; 32]},
     Created{public_y: [u8; 32], hash: [u8; 32]},
-    Relay{recognised: u32, stream_id: u32, digest: u32, data: RelayType, padding: Vec<u8>},
+    Relay{recognised: u64, digest: u64, stream_id: u32, data: RelayType, padding: Vec<u8>},
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct Cell {
+pub struct Cell {
     hop_id: u32,
     data: CellType,
 }
@@ -53,39 +70,25 @@ pub async fn main() {
 
         // Spawn a task that prints all received messages to STDOUT
         tokio::spawn(async move {
+
+            let mut fsm = FSM::new();
+
             //Wait for the first cell
             while let Some(msg) = framed_socket.try_next().await.unwrap() {
 
-                if let CellType::Create {public_x} = msg.data {
+                //First get the corresponding output
+                let out = fsm.output(&msg);
 
-                    //Setup the DH scheme
-                    let server_secret = EphemeralSecret::new(rand::rngs::OsRng);
-                    let server_public = PublicKey::from(&server_secret);
+                //transition to next state
+                fsm.transition(&msg);
 
-                    // Calculate the shared secret
-                    let onion_secret = server_secret.diffie_hellman(&PublicKey::from(public_x)).to_bytes();
-
-                    //Calculate thee hash of the shared secret
-                    let mut hasher = Sha256::new();
-
-                    hasher.update(&onion_secret);
-
-                    let ga = hasher.finalize();
-
-                    let calculated_hash = ga.as_slice();
-
-                    //Send the created ack
+                //If there is one, send the output
+                if let Some(out_cell) = out {
                     framed_socket
-                        .send(Cell { hop_id: 0, data: CellType::Created {public_y: server_public.to_bytes(), hash: calculated_hash.try_into().unwrap()} })
+                        .send(out_cell)
                         .await
                         .unwrap();
-
-                    println!("Shared: {:?}", onion_secret);
-
-                } else {
-
                 }
-
 
             }
         });
