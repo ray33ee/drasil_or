@@ -1,7 +1,6 @@
 mod onion_secret;
 mod skin;
-mod fsm;
-mod state;
+mod manager;
 
 use std::net::SocketAddr;
 use serde::{Serialize, Deserialize};
@@ -12,20 +11,7 @@ use tokio::net::TcpListener;
 use tokio_serde::formats::*;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use x25519_dalek::{EphemeralSecret, PublicKey};
-
-use crate::fsm::FSM;
-
-pub struct Relay {
-    recognised: u64,
-    digest: u64,
-    stream_id: u32,
-    data: RelayType,
-}
-
-//512 bytes of ciphertext
-pub struct EncryptedRelay {
-    ciphertext: Vec<u8>,
-}
+use crate::manager::Manager;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RelayType {
@@ -41,11 +27,12 @@ pub enum CellType {
     Create{public_x: [u8; 32]},
     Created{public_y: [u8; 32], hash: [u8; 32]},
     Relay{recognised: u64, digest: u64, stream_id: u32, data: RelayType, padding: Vec<u8>},
+    Encrypted{ cipher_text: Vec<u8> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Cell {
-    hop_id: u32,
+    circuit_id: u32,
     data: CellType,
 }
 
@@ -71,19 +58,22 @@ pub async fn main() {
         // Spawn a task that prints all received messages to STDOUT
         tokio::spawn(async move {
 
-            let mut fsm = FSM::new();
+            //let mut fsm = FSM::new();
+            let mut m = Manager::new();
 
             //Wait for the first cell
             while let Some(msg) = framed_socket.try_next().await.unwrap() {
 
+                let (output, _) = m.process(&msg);
+
                 //First get the corresponding output
-                let out = fsm.output(&msg);
+                //let out = fsm.output(&msg);
 
                 //transition to next state
-                fsm.transition(&msg);
+                //fsm.transition(&msg);
 
                 //If there is one, send the output
-                if let Some(out_cell) = out {
+                if let Some(out_cell) = output {
                     framed_socket
                         .send(out_cell)
                         .await
